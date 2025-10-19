@@ -1,7 +1,4 @@
 // /api/capture-link.js
-// POST { url, term } -> { ok, imageUrl, provider, cached }
-// Génère un lien de screenshot (sans télécharger l'image), le stocke dans Supabase et le renvoie.
-
 import { createClient } from "@supabase/supabase-js";
 import crypto from "node:crypto";
 
@@ -16,26 +13,22 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const TABLE = process.env.LINKS_TABLE || "capture_links";
 
-// Construis une URL de screenshot (sans appel réseau)
+// Construit une URL de screenshot (aucun fetch côté serveur)
 function buildScreenshotURL(targetURL) {
-  const SCREENSHOTONE_KEY = process.env.SCREENSHOTONE_KEY; // optionnel
-  if (SCREENSHOTONE_KEY) {
-    const base = new URL("https://api.screenshotone.com/take");
-    base.searchParams.set("access_key", SCREENSHOTONE_KEY);
-    base.searchParams.set("url", targetURL);
-    base.searchParams.set("format", "jpeg");
-    base.searchParams.set("viewport_width", "1280");
-    base.searchParams.set("viewport_height", "720");
-    base.searchParams.set("block_ads", "true");
-    base.searchParams.set("cache", "true");
-    return { url: base.toString(), provider: "screenshotone" };
+  const key = process.env.SCREENSHOTONE_KEY; // optionnel
+  if (key) {
+    const u = new URL("https://api.screenshotone.com/take");
+    u.searchParams.set("access_key", key);
+    u.searchParams.set("url", targetURL);
+    u.searchParams.set("format", "jpeg");
+    u.searchParams.set("viewport_width", "1280");
+    u.searchParams.set("viewport_height", "720");
+    u.searchParams.set("block_ads", "true");
+    u.searchParams.set("cache", "true");
+    return { url: u.toString(), provider: "screenshotone" };
   }
-
-  // fallback sans clé : thum.io (rend une image directement)
-  // (on ne l'appelle pas côté serveur — <img> la chargera côté client)
-  const thum = `https://image.thum.io/get/width/1280/crop/1280x720/noanimate/${encodeURIComponent(
-    targetURL
-  )}`;
+  // fallback gratuit (rend directement une image)
+  const thum = `https://image.thum.io/get/width/1280/crop/1280x720/noanimate/${encodeURIComponent(targetURL)}`;
   return { url: thum, provider: "thum.io" };
 }
 
@@ -54,12 +47,11 @@ export default async function handler(req, res) {
 
     const cleanTerm = String(term).trim().replace(/\s+/g, " ");
     const target = new URL(url);
-    // Scroll-To-Text highlight
+    // Scroll-To-Text highlight (le navigateur du provider fera le scroll/zoom)
     target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
 
     // clé de cache déterministe
     const urlHash = crypto.createHash("md5").update(`${url}::${cleanTerm}`).digest("hex");
-
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
     // 1) cache lookup
