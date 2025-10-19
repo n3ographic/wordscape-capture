@@ -1,92 +1,54 @@
-// /api/capture-link.js
-import { createClient } from "@supabase/supabase-js";
-import crypto from "node:crypto";
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const TABLE = process.env.LINKS_TABLE || "capture_links";
-
-const cors = (res) => {
+// /api/proxy-image.js
+// GET /api/proxy-image?src=<absolute image url>
+const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
-// construit un lien vers le provider (aucun fetch côté serveur)
-function buildScreenshotURL(targetURL) {
-  const key = process.env.SCREENSHOTONE_KEY; // optionnel provider premium
-  if (key) {
-    const u = new URL("https://api.screenshotone.com/take");
-    u.searchParams.set("access_key", key);
-    u.searchParams.set("url", targetURL.toString());
-    u.searchParams.set("format", "jpeg");
-    u.searchParams.set("viewport_width", "1280");
-    u.searchParams.set("viewport_height", "720");
-    u.searchParams.set("block_ads", "true");
-    u.searchParams.set("cache", "true");
-    return { url: u.toString(), provider: "screenshotone" };
-  }
-  // IMPORTANT : pas de double-encodage ; on protège seulement '#'
-  const safe = targetURL.toString().replace(/#/g, "%23");
-  const thum = `https://image.thum.io/get/width/1280/crop/1280x720/noanimate/${safe}`;
-  return { url: thum, provider: "thum.io" };
-}
+const ALLOW_HOSTS = new Set([
+  "image.thum.io",
+  "api.screenshotone.com",
+  "screenshotone.com",
+]);
 
 export default async function handler(req, res) {
-  cors(res);
+  CORS(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "GET") return res.status(405).send("GET only");
 
-  // ping de santé
-  if (req.method === "GET") {
-    return res.status(200).json({ ok: true, route: "capture-link", tip: "POST { url, term }" });
-  }
+  const src = req.query.src;
+  if (!src) return res.status(400).send("Missing src");
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "POST only" });
+  let u;
+  try {
+    u = new URL(src);
+  } catch {
+    return res.status(400).send("Invalid src");
   }
-
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-    return res.status(500).json({ ok: false, error: "Missing SUPABASE env vars" });
-  }
+  if (!ALLOW_HOSTS.has(u.hostname)) return res.status(400).send("Host not allowed");
 
   try {
-    const { url, term } = req.body || {};
-    if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch(u, { signal: ctrl.signal });
+    clearTimeout(id);
 
-    const cleanTerm = String(term).trim().replace(/\s+/g, " ");
-    const target = new URL(url);
-    // scroll-to-text pour centrer la zone recherchée
-    target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
-
-    const urlHash = crypto.createHash("md5").update(`${url}::${cleanTerm}`).digest("hex");
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
-
-    // cache
-    const { data: row } = await supabase
-      .from(TABLE)
-      .select("image_url")
-      .eq("url_hash", urlHash)
-      .maybeSingle();
-
-    if (row?.image_url) {
-      return res.json({ ok: true, imageUrl: row.image_url, provider: "cache", cached: true });
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(r.status).send(t);
     }
 
-    // lien direct du provider (aucun appel serveur)
-    const { url: imageUrl, provider } = buildScreenshotURL(target);
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=0, s-maxage=86400, stale-while-revalidate=604800"
+    );
+    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
 
-    // persistance
-    const { error: upErr } = await supabase.from(TABLE).upsert({
-      url_hash: urlHash,
-      url,
-      term: cleanTerm,
-      image_url: imageUrl,
-    });
-    if (upErr) return res.status(502).json({ ok: false, error: upErr.message });
-
-    return res.json({ ok: true, imageUrl, provider, cached: false });
+    const buf = Buffer.from(await r.arrayBuffer());
+    return res.status(200).send(buf);
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    return res.status(502).send(String(e?.message || e));
   }
 }
