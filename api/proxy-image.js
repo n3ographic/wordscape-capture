@@ -1,4 +1,4 @@
-// /api/proxy-image.js
+// GET /api/proxy-image?src=<image-url-encodée>
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -6,12 +6,8 @@ const CORS = (res) => {
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
-const ALLOW_HOSTS = new Set([
-  "image.thum.io",
-  "api.screenshotone.com",
-  "screenshotone.com",
-  "api.microlink.io" // 👈 Microlink
-]);
+// autorise par suffixe de domaine (plus robuste : *microlink.io, *thum.io, *screenshotone.com)
+const ALLOW_SUFFIX = ["microlink.io", "thum.io", "screenshotone.com"];
 
 export default async function handler(req, res) {
   CORS(res);
@@ -26,18 +22,18 @@ export default async function handler(req, res) {
 
   let u;
   try { u = new URL(decoded); } catch { return res.status(400).send("Invalid src"); }
-  if (!ALLOW_HOSTS.has(u.hostname)) return res.status(400).send("Host not allowed");
+  const okHost = ALLOW_SUFFIX.some(sfx => u.hostname === sfx || u.hostname.endsWith(`.${sfx}`));
+  if (!okHost) return res.status(400).send("Host not allowed");
 
   try {
-    const microlink = u.hostname === "api.microlink.io";
     const headers = {
-      "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-      ...(microlink && process.env.MICROLINK_KEY ? { "x-api-key": process.env.MICROLINK_KEY } : {})
+      "User-Agent": req.headers["user-agent"] || "Mozilla/5.0"
+      // Si un jour tu ajoutes MICROLINK_KEY payant, tu peux décommenter :
+      // ...(u.hostname.endsWith("microlink.io") && process.env.MICROLINK_KEY ? { "x-api-key": process.env.MICROLINK_KEY } : {})
     };
 
     const ctrl = new AbortController();
     const id = setTimeout(() => ctrl.abort(), 15000);
-
     const r = await fetch(u.toString(), { signal: ctrl.signal, headers });
     clearTimeout(id);
 
