@@ -1,17 +1,10 @@
 {
-  "name": "toilet-sticker",
+  "name": "wordscape-api",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview --port 4173"
-  },
+  "engines": { "node": "20.x" },        // garde Node 20 pour Puppeteer + Chromium
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0",
-    "three": "0.180.0"
-  },
-  "devDependencies": {
-    "vite": "^6.0.0"
+    "@sparticuz/chromium": "^129.0.0",
+    "puppeteer-core": "^22.10.0"
   }
 }
