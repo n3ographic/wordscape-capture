@@ -1,11 +1,9 @@
+// package.json
 {
   "name": "wordscape-capture",
   "private": true,
   "type": "module",
   "engines": { "node": "20.x" },
-  "scripts": {
-    "build": "echo \"no build (api-only)\""
-  },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"
   }
