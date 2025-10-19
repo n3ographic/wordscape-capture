@@ -1,14 +1,10 @@
 {
-  "name": "wordscape-api",
-  "version": "1.0.0",
+  "name": "wordscape-capture",
   "private": true,
   "type": "module",
-  "engines": { "node": "20.x" },
-  "scripts": {
-    "build": "echo \"no build (api-only)\""
-  },
+  "engines": { "node": ">=20" },
   "dependencies": {
-    "@sparticuz/chromium": "129.0.0",
-    "puppeteer-core": "22.10.0"
+    "@sparticuz/chromium": "^129.0.0",
+    "puppeteer-core": "^22.10.0"
   }
 }
