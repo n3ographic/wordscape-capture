@@ -1,6 +1,5 @@
-// /api/occurrence-links.js
 // POST { url, term, max?: number, wholeWord?: boolean }
-// -> { ok, items:[{ imageUrl, target, fragment, provider }], count }
+// -> { ok, items:[{ imageUrl, fallbackUrl, target, fragment, provider }], count }
 
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -15,7 +14,6 @@ function fetchWithTimeout(url, options = {}, ms = 12000) {
   return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
 }
 
-// HTML -> texte visible (grossièrement)
 function htmlToText(html) {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
@@ -26,34 +24,30 @@ function htmlToText(html) {
     .trim();
 }
 
-// “caractère de mot” (Lettre/Chiffre/_ ; Unicode)
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
 const isWordChar = (ch) => !!(ch && WORD_CHAR_RE.test(ch));
 
-// --- Microlink pour les occurrences (scroll to text fragment + CSS jaune) ---
-function buildMicrolinkURL(targetURL) {
+async function screenshotMicrolink(targetURL) {
+  // Appelle Microlink, récupère JSON, extrait l’URL image directe.
   const u = new URL("https://api.microlink.io");
-  u.searchParams.set("url", targetURL.toString());   // contient #:~:text=...
+  u.searchParams.set("url", targetURL.toString());     // contient #:~:text=...
   u.searchParams.set("screenshot", "true");
-  u.searchParams.set("embed", "screenshot.url");     // on veut directement l’URL de l’image
-  // viewport 1280x720
+  u.searchParams.set("meta", "false");
   u.searchParams.set("viewport.width", "1280");
   u.searchParams.set("viewport.height", "720");
-  // petite pause pour laisser le highlight/scroll se poser
   u.searchParams.set("waitForTimeout", "800");
-  // vrai surlignage jaune du navigateur via ::target-text
   u.searchParams.set(
     "styles",
     "::target-text{background:#ff0!important;color:#000!important;outline:6px solid rgba(255,215,0,.9)!important;}"
   );
-  // tu peux ajouter 'adblock=true' si besoin
-  return { url: u.toString(), provider: "microlink" };
-}
+  // Si jamais tu ajoutes MICROLINK_KEY plus tard, on l’enverra via proxy-image (pas ici).
 
-// fallback thum.io si jamais tu retires Microlink plus tard
-function buildThumURL(targetURL) {
-  const safe = targetURL.toString().replace(/#/g, "%23");
-  return { url: `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`, provider: "thum.io" };
+  const r = await fetchWithTimeout(u.toString(), {}, 15000);
+  if (!r.ok) throw new Error(`Microlink ${r.status}`);
+  const j = await r.json();
+  const url = j?.data?.screenshot?.url;
+  if (!url) throw new Error("Microlink: no screenshot.url");
+  return url; // URL d'image (hébergée par Microlink CDN)
 }
 
 export default async function handler(req, res) {
@@ -65,14 +59,14 @@ export default async function handler(req, res) {
     const { url, term, max = 8, wholeWord = true } = req.body || {};
     if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
 
-    // 1) Récupère la page et extrait un texte
+    // 1) Récupère page & texte
     const page = await fetchWithTimeout(url, {}, 12000);
     if (!page.ok) return res.status(502).json({ ok: false, error: `Fetch failed: ${page.status}` });
     const html = await page.text();
     const text = htmlToText(html);
     if (!text) return res.json({ ok: true, items: [], count: 0 });
 
-    // 2) Trouve toutes les occurrences (insensible à la casse + frontière de mot)
+    // 2) Trouve toutes les occurrences (insensible à la casse + frontières de mot)
     const lower = text.toLocaleLowerCase();
     const needle = String(term).toLocaleLowerCase();
     const cap = Math.max(1, Math.min(parseInt(max, 10) || 8, 20));
@@ -88,8 +82,8 @@ export default async function handler(req, res) {
       if (wholeWord) {
         const before = text[start - 1] || "";
         const after  = text[end] || "";
-        const okBoundary = !isWordChar(before) && !isWordChar(after);
-        if (!okBoundary) { from = i + needle.length; continue; }
+        const ok = !isWordChar(before) && !isWordChar(after);
+        if (!ok) { from = i + needle.length; continue; }
       }
 
       positions.push({ start, end });
@@ -98,9 +92,10 @@ export default async function handler(req, res) {
 
     if (!positions.length) return res.json({ ok: true, items: [], count: 0 });
 
-    // 3) Construit un fragment :~:text=prefix-,mot,-suffix pour CHAQUE occurrence
-    const ctx = 30; // nb de caractères de contexte
-    const items = positions.map(({ start, end }) => {
+    // 3) Construit un fragment pour CHAQUE occurrence, screenshot Microlink + fallback thum.io
+    const ctx = 30;
+    const items = [];
+    for (const { start, end } of positions) {
       const before = text.slice(Math.max(0, start - ctx), start).trim();
       const match  = text.slice(start, end);
       const after  = text.slice(end, Math.min(text.length, end + ctx)).trim();
@@ -109,10 +104,18 @@ export default async function handler(req, res) {
       const target = new URL(url);
       target.hash = frag;
 
-      // Microlink si on a la clé (ajoutée par le proxy en header), sinon thum.io
-      const { url: imageUrl, provider } = buildMicrolinkURL(target);
-      return { imageUrl, target: target.toString(), fragment: frag, provider };
-    });
+      // Microlink (image directe)
+      let imageUrl = "";
+      try {
+        imageUrl = await screenshotMicrolink(target);
+      } catch { /* on laissera le fallback s'appliquer côté client */ }
+
+      // Fallback thum.io (au cas où Microlink rate/quota)
+      const safe = target.toString().replace(/#/g, "%23");
+      const fallbackUrl = `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`;
+
+      items.push({ imageUrl, fallbackUrl, target: target.toString(), fragment: frag, provider: imageUrl ? "microlink" : "thum.io" });
+    }
 
     res.json({ ok: true, items, count: items.length });
   } catch (e) {
