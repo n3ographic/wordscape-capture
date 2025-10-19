@@ -1,5 +1,7 @@
 // /api/proxy-image.js
-// GET /api/proxy-image?src=<absolute image url>
+// GET /api/proxy-image?src=<image-url-encodée>
+// -> renvoie l'image en same-origin (avec cache CDN)
+
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -18,26 +20,42 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).send("GET only");
 
-  const src = req.query.src;
-  if (!src) return res.status(400).send("Missing src");
+  const raw = req.query.src;
+  if (!raw) return res.status(400).send("Missing src");
+
+  // 🔧 le src vient encodé depuis Framer -> on le DECODE
+  let decoded = Array.isArray(raw) ? raw[0] : raw;
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    // si déjà décodé / mal encodé, on garde tel quel
+  }
 
   let u;
   try {
-    u = new URL(src);
+    u = new URL(decoded);
   } catch {
     return res.status(400).send("Invalid src");
   }
-  if (!ALLOW_HOSTS.has(u.hostname)) return res.status(400).send("Host not allowed");
+
+  if (!ALLOW_HOSTS.has(u.hostname)) {
+    return res.status(400).send("Host not allowed");
+  }
 
   try {
     const ctrl = new AbortController();
-    const id = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch(u, { signal: ctrl.signal });
+    const id = setTimeout(() => ctrl.abort(), 15000);
+
+    // forward le user-agent pour réduire certains blocages
+    const r = await fetch(u.toString(), {
+      signal: ctrl.signal,
+      headers: { "User-Agent": req.headers["user-agent"] || "Mozilla/5.0" },
+    });
     clearTimeout(id);
 
     if (!r.ok) {
-      const t = await r.text();
-      return res.status(r.status).send(t);
+      const text = await r.text().catch(() => "");
+      return res.status(r.status).send(text || `Upstream ${r.status}`);
     }
 
     res.setHeader(
