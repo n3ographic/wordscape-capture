@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 const cors = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
@@ -13,9 +13,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const TABLE = process.env.LINKS_TABLE || "capture_links";
 
-// Construit une URL de screenshot (aucun fetch côté serveur)
 function buildScreenshotURL(targetURL) {
-  const key = process.env.SCREENSHOTONE_KEY; // optionnel (provider premium)
+  const key = process.env.SCREENSHOTONE_KEY; // optionnel
   if (key) {
     const u = new URL("https://api.screenshotone.com/take");
     u.searchParams.set("access_key", key);
@@ -27,14 +26,21 @@ function buildScreenshotURL(targetURL) {
     u.searchParams.set("cache", "true");
     return { url: u.toString(), provider: "screenshotone" };
   }
-  // fallback gratuit : lien image direct
-  const thum = `https://image.thum.io/get/width/1280/crop/1280x720/noanimate/${encodeURIComponent(targetURL)}`;
+  const thum = `https://image.thum.io/get/width/1280/crop/1280x720/noanimate/${encodeURIComponent(
+    targetURL
+  )}`;
   return { url: thum, provider: "thum.io" };
 }
 
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  // Petit ping pour vérifier que la route existe (GET)
+  if (req.method === "GET") {
+    return res.status(200).json({ ok: true, route: "capture-link", tip: "Use POST" });
+  }
+
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
@@ -47,13 +53,12 @@ export default async function handler(req, res) {
 
     const cleanTerm = String(term).trim().replace(/\s+/g, " ");
     const target = new URL(url);
-    // Scroll-To-Text highlight dans le navigateur du provider
     target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
 
     const urlHash = crypto.createHash("md5").update(`${url}::${cleanTerm}`).digest("hex");
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
-    // 1) cache lookup
+    // Cache lookup
     const { data: row } = await supabase
       .from(TABLE)
       .select("image_url")
@@ -64,10 +69,10 @@ export default async function handler(req, res) {
       return res.json({ ok: true, imageUrl: row.image_url, provider: "cache", cached: true });
     }
 
-    // 2) génère le lien (aucun fetch ici)
+    // Génère un lien (aucun fetch côté serveur)
     const { url: imageUrl, provider } = buildScreenshotURL(target.toString());
 
-    // 3) stocke le lien
+    // Stocke
     const { error: upErr } = await supabase.from(TABLE).upsert({
       url_hash: urlHash,
       url,
@@ -76,7 +81,6 @@ export default async function handler(req, res) {
     });
     if (upErr) return res.status(502).json({ ok: false, error: upErr.message });
 
-    // 4) renvoie
     return res.json({ ok: true, imageUrl, provider, cached: false });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
