@@ -1,121 +1,57 @@
-// /api/occurrence-links.js
-// POST { url, term, max?: number, wholeWord?: boolean }
-// -> { ok, items:[{ imageUrl, target, fragment, provider }], count }
-
+// /api/proxy-image.js
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
-function fetchWithTimeout(url, options = {}, ms = 12000) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
-}
-
-// HTML -> texte visible (grossièrement)
-function htmlToText(html) {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// “caractère de mot” (Lettre/Chiffre/_ ; Unicode)
-const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
-const isWordChar = (ch) => !!(ch && WORD_CHAR_RE.test(ch));
-
-// --- Microlink pour les occurrences (scroll to text fragment + CSS jaune) ---
-function buildMicrolinkURL(targetURL) {
-  const u = new URL("https://api.microlink.io");
-  u.searchParams.set("url", targetURL.toString());   // contient #:~:text=...
-  u.searchParams.set("screenshot", "true");
-  u.searchParams.set("embed", "screenshot.url");     // on veut directement l’URL de l’image
-  // viewport 1280x720
-  u.searchParams.set("viewport.width", "1280");
-  u.searchParams.set("viewport.height", "720");
-  // petite pause pour laisser le highlight/scroll se poser
-  u.searchParams.set("waitForTimeout", "800");
-  // vrai surlignage jaune du navigateur via ::target-text
-  u.searchParams.set(
-    "styles",
-    "::target-text{background:#ff0!important;color:#000!important;outline:6px solid rgba(255,215,0,.9)!important;}"
-  );
-  // tu peux ajouter 'adblock=true' si besoin
-  return { url: u.toString(), provider: "microlink" };
-}
-
-// fallback thum.io si jamais tu retires Microlink plus tard
-function buildThumURL(targetURL) {
-  const safe = targetURL.toString().replace(/#/g, "%23");
-  return { url: `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`, provider: "thum.io" };
-}
+const ALLOW_HOSTS = new Set([
+  "image.thum.io",
+  "api.screenshotone.com",
+  "screenshotone.com",
+  "api.microlink.io" // 👈 Microlink
+]);
 
 export default async function handler(req, res) {
   CORS(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+  if (req.method !== "GET") return res.status(405).send("GET only");
+
+  const raw = req.query.src;
+  if (!raw) return res.status(400).send("Missing src");
+
+  let decoded = Array.isArray(raw) ? raw[0] : raw;
+  try { decoded = decodeURIComponent(decoded); } catch {}
+
+  let u;
+  try { u = new URL(decoded); } catch { return res.status(400).send("Invalid src"); }
+  if (!ALLOW_HOSTS.has(u.hostname)) return res.status(400).send("Host not allowed");
 
   try {
-    const { url, term, max = 8, wholeWord = true } = req.body || {};
-    if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
+    const microlink = u.hostname === "api.microlink.io";
+    const headers = {
+      "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+      ...(microlink && process.env.MICROLINK_KEY ? { "x-api-key": process.env.MICROLINK_KEY } : {})
+    };
 
-    // 1) Récupère la page et extrait un texte
-    const page = await fetchWithTimeout(url, {}, 12000);
-    if (!page.ok) return res.status(502).json({ ok: false, error: `Fetch failed: ${page.status}` });
-    const html = await page.text();
-    const text = htmlToText(html);
-    if (!text) return res.json({ ok: true, items: [], count: 0 });
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 15000);
 
-    // 2) Trouve toutes les occurrences (insensible à la casse + frontière de mot)
-    const lower = text.toLocaleLowerCase();
-    const needle = String(term).toLocaleLowerCase();
-    const cap = Math.max(1, Math.min(parseInt(max, 10) || 8, 20));
+    const r = await fetch(u.toString(), { signal: ctrl.signal, headers });
+    clearTimeout(id);
 
-    const positions = [];
-    let from = 0;
-    while (positions.length < cap) {
-      const i = lower.indexOf(needle, from);
-      if (i === -1) break;
-      const start = i;
-      const end = i + needle.length;
-
-      if (wholeWord) {
-        const before = text[start - 1] || "";
-        const after  = text[end] || "";
-        const okBoundary = !isWordChar(before) && !isWordChar(after);
-        if (!okBoundary) { from = i + needle.length; continue; }
-      }
-
-      positions.push({ start, end });
-      from = i + needle.length;
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      return res.status(r.status).send(text || `Upstream ${r.status}`);
     }
 
-    if (!positions.length) return res.json({ ok: true, items: [], count: 0 });
+    res.setHeader("Cache-Control", "public, max-age=0, s-maxage=86400, stale-while-revalidate=604800");
+    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
 
-    // 3) Construit un fragment :~:text=prefix-,mot,-suffix pour CHAQUE occurrence
-    const ctx = 30; // nb de caractères de contexte
-    const items = positions.map(({ start, end }) => {
-      const before = text.slice(Math.max(0, start - ctx), start).trim();
-      const match  = text.slice(start, end);
-      const after  = text.slice(end, Math.min(text.length, end + ctx)).trim();
-
-      const frag = `:~:text=${encodeURIComponent(before)}-,${encodeURIComponent(match)},-${encodeURIComponent(after)}`;
-      const target = new URL(url);
-      target.hash = frag;
-
-      // Microlink si on a la clé (ajoutée par le proxy en header), sinon thum.io
-      const { url: imageUrl, provider } = buildMicrolinkURL(target);
-      return { imageUrl, target: target.toString(), fragment: frag, provider };
-    });
-
-    res.json({ ok: true, items, count: items.length });
+    const buf = Buffer.from(await r.arrayBuffer());
+    return res.status(200).send(buf);
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    return res.status(502).send(String(e?.message || e));
   }
 }
