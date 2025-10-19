@@ -2,9 +2,5 @@
   "name": "wordscape-capture",
   "private": true,
   "type": "module",
-  "engines": { "node": "20.x" },
-  "dependencies": {
-    "@sparticuz/chromium": "^129.0.0",
-    "puppeteer-core": "^22.10.0"
-  }
+  "engines": { "node": "20.x" }
 }
