@@ -26,7 +26,7 @@ export default async function handler(req, res) {
       executablePath,
       headless: chromium.headless,
       defaultViewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
-      // 🔑 indispensable pour libnss3.so & co
+      // 🔑 indispensable pour que Chromium trouve libnss3.so & co
       env: { ...process.env, ...chromium.env },
     });
 
