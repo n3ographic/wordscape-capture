@@ -17,7 +17,7 @@ const BUCKET = process.env.BUCKET_NAME || "shots";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
-function fetchWithTimeout(url, options = {}, ms = 8000) {
+function fetchWithTimeout(url, options = {}, ms = 20000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
@@ -67,14 +67,14 @@ export default async function handler(req, res) {
     api.searchParams.set("screenshot.viewport.height", "720");
     api.searchParams.set("waitForTimeout", "600");
 
-    const r = await fetchWithTimeout(api, {}, 8000);
+    const r = await fetchWithTimeout(api, {}, 20000);
     const j = await r.json().catch(() => null);
     const upstreamUrl = j?.data?.screenshot?.url;
     if (!r.ok || !upstreamUrl)
       return res.status(502).json({ ok: false, error: j?.error?.message || "Screenshot failed" });
 
     // 4) Download image
-    const imgRes = await fetchWithTimeout(upstreamUrl, {}, 8000);
+    const imgRes = await fetchWithTimeout(upstreamUrl, {}, 20000);
     if (!imgRes.ok) return res.status(502).json({ ok: false, error: "Image fetch failed" });
     const buf = Buffer.from(await imgRes.arrayBuffer());
 
