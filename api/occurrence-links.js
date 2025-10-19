@@ -1,4 +1,7 @@
-// POST { url, term, max?: number, wholeWord?: boolean } -> { ok, items:[{ imageUrl, target, fragment, provider }], count }
+// /api/occurrence-links.js
+// POST { url, term, max?: number, wholeWord?: boolean }
+// -> { ok, items:[{ imageUrl, target, fragment, provider }], count }
+
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -11,6 +14,8 @@ function fetchWithTimeout(url, options = {}, ms = 12000) {
   const id = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
 }
+
+// HTML -> texte visible (grossièrement)
 function htmlToText(html) {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
@@ -20,25 +25,35 @@ function htmlToText(html) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// “caractère de mot” (Lettre/Chiffre/_ ; Unicode)
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
 const isWordChar = (ch) => !!(ch && WORD_CHAR_RE.test(ch));
 
-function buildScreenshotURL(targetURL) {
-  const key = process.env.SCREENSHOTONE_KEY;
-  if (key) {
-    const u = new URL("https://api.screenshotone.com/take");
-    u.searchParams.set("access_key", key);
-    u.searchParams.set("url", targetURL.toString());
-    u.searchParams.set("format", "jpeg");
-    u.searchParams.set("viewport_width", "1280");
-    u.searchParams.set("viewport_height", "720");
-    u.searchParams.set("block_ads", "true");
-    u.searchParams.set("cache", "true");
-    return { url: u.toString(), provider: "screenshotone" };
-  }
+// --- Microlink pour les occurrences (scroll to text fragment + CSS jaune) ---
+function buildMicrolinkURL(targetURL) {
+  const u = new URL("https://api.microlink.io");
+  u.searchParams.set("url", targetURL.toString());   // contient #:~:text=...
+  u.searchParams.set("screenshot", "true");
+  u.searchParams.set("embed", "screenshot.url");     // on veut directement l’URL de l’image
+  // viewport 1280x720
+  u.searchParams.set("viewport.width", "1280");
+  u.searchParams.set("viewport.height", "720");
+  // petite pause pour laisser le highlight/scroll se poser
+  u.searchParams.set("waitForTimeout", "800");
+  // vrai surlignage jaune du navigateur via ::target-text
+  u.searchParams.set(
+    "styles",
+    "::target-text{background:#ff0!important;color:#000!important;outline:6px solid rgba(255,215,0,.9)!important;}"
+  );
+  // tu peux ajouter 'adblock=true' si besoin
+  return { url: u.toString(), provider: "microlink" };
+}
+
+// fallback thum.io si jamais tu retires Microlink plus tard
+function buildThumURL(targetURL) {
   const safe = targetURL.toString().replace(/#/g, "%23");
-  const thum = `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`;
-  return { url: thum, provider: "thum.io" };
+  return { url: `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`, provider: "thum.io" };
 }
 
 export default async function handler(req, res) {
@@ -47,22 +62,24 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
 
   try {
-    const { url, term, max = 5, wholeWord = true } = req.body || {};
+    const { url, term, max = 8, wholeWord = true } = req.body || {};
     if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
 
+    // 1) Récupère la page et extrait un texte
     const page = await fetchWithTimeout(url, {}, 12000);
     if (!page.ok) return res.status(502).json({ ok: false, error: `Fetch failed: ${page.status}` });
     const html = await page.text();
     const text = htmlToText(html);
     if (!text) return res.json({ ok: true, items: [], count: 0 });
 
+    // 2) Trouve toutes les occurrences (insensible à la casse + frontière de mot)
     const lower = text.toLocaleLowerCase();
     const needle = String(term).toLocaleLowerCase();
-    const maxCount = Math.max(1, Math.min(max, 20));
+    const cap = Math.max(1, Math.min(parseInt(max, 10) || 8, 20));
 
     const positions = [];
     let from = 0;
-    while (positions.length < maxCount) {
+    while (positions.length < cap) {
       const i = lower.indexOf(needle, from);
       if (i === -1) break;
       const start = i;
@@ -71,30 +88,29 @@ export default async function handler(req, res) {
       if (wholeWord) {
         const before = text[start - 1] || "";
         const after  = text[end] || "";
-        const ok = !isWordChar(before) && !isWordChar(after);
-        if (!ok) { from = i + needle.length; continue; }
+        const okBoundary = !isWordChar(before) && !isWordChar(after);
+        if (!okBoundary) { from = i + needle.length; continue; }
       }
+
       positions.push({ start, end });
       from = i + needle.length;
     }
 
     if (!positions.length) return res.json({ ok: true, items: [], count: 0 });
 
-    const windowSize = 30;
+    // 3) Construit un fragment :~:text=prefix-,mot,-suffix pour CHAQUE occurrence
+    const ctx = 30; // nb de caractères de contexte
     const items = positions.map(({ start, end }) => {
-      const before = text.slice(Math.max(0, start - windowSize), start).trim();
+      const before = text.slice(Math.max(0, start - ctx), start).trim();
       const match  = text.slice(start, end);
-      const after  = text.slice(end, Math.min(text.length, end + windowSize)).trim();
+      const after  = text.slice(end, Math.min(text.length, end + ctx)).trim();
 
-      const prefixEnc = encodeURIComponent(before);
-      const termEnc   = encodeURIComponent(match);
-      const suffixEnc = encodeURIComponent(after);
-      const frag = `:~:text=${prefixEnc}-,${termEnc},-${suffixEnc}`;
-
+      const frag = `:~:text=${encodeURIComponent(before)}-,${encodeURIComponent(match)},-${encodeURIComponent(after)}`;
       const target = new URL(url);
       target.hash = frag;
 
-      const { url: imageUrl, provider } = buildScreenshotURL(target);
+      // Microlink si on a la clé (ajoutée par le proxy en header), sinon thum.io
+      const { url: imageUrl, provider } = buildMicrolinkURL(target);
       return { imageUrl, target: target.toString(), fragment: frag, provider };
     });
 
