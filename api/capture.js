@@ -1,5 +1,6 @@
 // /api/capture.js
-// POST { url, term } -> image/jpeg (surligne via #:~:text=TERM et capture via Microlink)
+// POST { url, term } -> image/jpeg
+// Capture via Microlink + surlignage avec #:~:text=<term>
 
 const cors = (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -17,13 +18,12 @@ export default async function handler(req, res) {
     const { url, term } = req.body || {};
     if (!url || !term) return res.status(400).send("Missing url or term");
 
-    // 1) Construit l’URL cible avec highlight (Chrome)
     const cleanTerm = String(term).trim().replace(/\s+/g, " ");
     const target = new URL(url);
+    // Surligne le mot dans la page (Chrome Scroll To Text)
     target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
 
-    // 2) Appelle Microlink pour obtenir une capture
-    //    Pas de clé nécessaire pour tester (limites de quota). Pour prod, prends une clé puis proxifie côté serveur.
+    // Appel Microlink -> screenshot JPEG
     const api = new URL("https://api.microlink.io/");
     api.searchParams.set("url", target.toString());
     api.searchParams.set("screenshot", "true");
@@ -32,23 +32,19 @@ export default async function handler(req, res) {
     api.searchParams.set("screenshot.device", "desktop");
     api.searchParams.set("screenshot.viewport.width", "1280");
     api.searchParams.set("screenshot.viewport.height", "720");
-    api.searchParams.set("waitForTimeout", "800"); // petite pause pour laisser le highlight apparaître
+    api.searchParams.set("waitForTimeout", "800");
 
-    const r = await fetch(api.toString());
+    const r = await fetch(api);
     const j = await r.json();
     const imgUrl = j?.data?.screenshot?.url;
     if (!r.ok || !imgUrl) {
-      return res
-        .status(502)
-        .send(j?.error?.message || "Failed to capture screenshot.");
+      return res.status(502).send(j?.error?.message || "Failed to capture screenshot.");
     }
 
-    // 3) Récupère l’image et la renvoie en binaire
     const imgRes = await fetch(imgUrl);
-    if (!imgRes.ok) {
-      return res.status(502).send("Upstream image fetch failed.");
-    }
+    if (!imgRes.ok) return res.status(502).send("Upstream image fetch failed.");
     const buf = Buffer.from(await imgRes.arrayBuffer());
+
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "no-store");
     return res.send(buf);
