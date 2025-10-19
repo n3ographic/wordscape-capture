@@ -1,6 +1,7 @@
 // /api/capture-store.js
-// POST { url, term } -> JSON { ok, imageUrl, path }
-// 1) Surligne via #:~:text=<term>, 2) capture via Microlink, 3) upload dans Supabase Storage.
+// POST { url, term } -> { ok, imageUrl, path, source }
+// Cache Supabase via table `captures` (clé = md5(url::term))
+// Capture via Microlink + surlignage #:~:text=<term>
 
 import { createClient } from "@supabase/supabase-js";
 import crypto from "node:crypto";
@@ -12,6 +13,10 @@ const CORS = (res) => {
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
+const BUCKET = process.env.BUCKET_NAME || "shots";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+
 function fetchWithTimeout(url, options = {}, ms = 8000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
@@ -22,24 +27,36 @@ export default async function handler(req, res) {
   CORS(res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")   return res.status(405).json({ ok: false, error: "POST only" });
-
-  const { url, term } = req.body || {};
-  if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
-
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-  const BUCKET = process.env.BUCKET_NAME || "shots";
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE)
     return res.status(500).json({ ok: false, error: "Missing SUPABASE env vars" });
-  }
 
   try {
-    // 1) URL cible + surlignage
+    const { url, term } = req.body || {};
+    if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
+
     const cleanTerm = String(term).trim().replace(/\s+/g, " ");
+    const urlHash = crypto.createHash("md5").update(`${url}::${cleanTerm}`).digest("hex");
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
+
+    // 1) Lookup cache
+    const { data: row } = await supabase
+      .from("captures")
+      .select("path")
+      .eq("url_hash", urlHash)
+      .maybeSingle();
+
+    if (row?.path) {
+      const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(row.path);
+      if (pub?.publicUrl) {
+        return res.json({ ok: true, imageUrl: pub.publicUrl, path: row.path, cached: true });
+      }
+    }
+
+    // 2) Build target URL with text fragment (#:~:text=)
     const target = new URL(url);
     target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
 
-    // 2) Capture via Microlink (timeout court)
+    // 3) Ask Microlink (timeout court pour éviter Vercel timeout)
     const api = new URL("https://api.microlink.io/");
     api.searchParams.set("url", target.toString());
     api.searchParams.set("screenshot", "true");
@@ -53,44 +70,31 @@ export default async function handler(req, res) {
     const r = await fetchWithTimeout(api, {}, 8000);
     const j = await r.json().catch(() => null);
     const upstreamUrl = j?.data?.screenshot?.url;
-    if (!r.ok || !upstreamUrl) {
+    if (!r.ok || !upstreamUrl)
       return res.status(502).json({ ok: false, error: j?.error?.message || "Screenshot failed" });
-    }
 
-    // 3) Télécharge l'image
+    // 4) Download image
     const imgRes = await fetchWithTimeout(upstreamUrl, {}, 8000);
     if (!imgRes.ok) return res.status(502).json({ ok: false, error: "Image fetch failed" });
     const buf = Buffer.from(await imgRes.arrayBuffer());
 
-    // 4) Upload dans Supabase Storage
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
-    const key = crypto
-      .createHash("md5")
-      .update(`${url}::${cleanTerm}`)
-      .digest("hex");
-
-    const filename = `${key}_${Date.now()}.jpg`;
-    const path = `${filename}`;
-
+    // 5) Upload (clé déterministe = url_hash.jpg) avec upsert
+    const path = `${urlHash}.jpg`;
     const { error: upErr } = await supabase.storage
       .from(BUCKET)
-      .upload(path, buf, { contentType: "image/jpeg", upsert: false });
+      .upload(path, buf, { contentType: "image/jpeg", upsert: true });
+    if (upErr) return res.status(502).json({ ok: false, error: upErr.message });
 
-    if (upErr) {
-      // si le fichier existe déjà, on renvoie le public URL
-      if (!String(upErr.message || "").toLowerCase().includes("duplicate")) {
-        return res.status(502).json({ ok: false, error: upErr.message });
-      }
-    }
+    // 6) Upsert metadata
+    await supabase
+      .from("captures")
+      .upsert({ url_hash: urlHash, url, term: cleanTerm, path }, { onConflict: "url_hash" });
 
-    // 5) Public URL (bucket public) ou Signed URL (bucket privé)
-    // -- Public (plus simple) :
+    // 7) Public URL
     const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path);
-    const imageUrl = pub?.publicUrl;
+    if (!pub?.publicUrl) return res.status(500).json({ ok: false, error: "Cannot get public URL" });
 
-    if (!imageUrl) return res.status(500).json({ ok: false, error: "Cannot get public URL" });
-
-    return res.json({ ok: true, imageUrl, path, term: cleanTerm, source: target.toString() });
+    return res.json({ ok: true, imageUrl: pub.publicUrl, path, source: target.toString(), cached: false });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
