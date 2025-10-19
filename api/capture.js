@@ -1,20 +1,18 @@
 // /api/capture.js
-// POST { url, term } -> image/jpeg (surligne `term` puis screenshot)
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 
-const allowCors = (req, res) => {
-  const origin = req.headers.origin || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
+const cors = (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "600");
 };
 
 export default async function handler(req, res) {
-  allowCors(req, res);
+  cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).send("POST only");
+  if (req.method !== "POST")   return res.status(405).send("POST only");
 
   const { url, term } = req.body || {};
   if (!url || !term) return res.status(400).send("Missing url or term");
@@ -22,11 +20,15 @@ export default async function handler(req, res) {
   let browser;
   try {
     const executablePath = await chromium.executablePath();
+
     browser = await puppeteer.launch({
       args: chromium.args,
       executablePath,
       headless: chromium.headless,
-      defaultViewport: { width: 1280, height: 720, deviceScaleFactor: 1 }
+      defaultViewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
+
+      // 🔑 IMPORTANT: passer les variables d'env de chromium
+      env: { ...process.env, ...chromium.env },
     });
 
     const page = await browser.newPage();
@@ -37,26 +39,20 @@ export default async function handler(req, res) {
       content: `
         mark.__ws{background:#ffeb3b;padding:.1em .25em;border-radius:.2em}
         .__ws_focus{outline:4px solid #ff9800;outline-offset:4px}
-      `
+      `,
     });
 
-    // Surligne la 1re occurrence (insensible aux accents/majuscules)
     await page.evaluate((needle) => {
       const norm = (s) => s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
       const target = norm(needle);
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      const range = document.createRange();
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        const t = node.nodeValue || "";
-        const i = norm(t).indexOf(target);
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      const r = document.createRange();
+      while (w.nextNode()) {
+        const n = w.currentNode, t = n.nodeValue || "", i = norm(t).indexOf(target);
         if (i >= 0) {
-          range.setStart(node, i);
-          range.setEnd(node, i + target.length);
-          const mark = document.createElement("mark");
-          mark.className = "__ws __ws_focus";
-          range.surroundContents(mark);
-          mark.scrollIntoView({ block: "center", inline: "center" });
+          r.setStart(n, i); r.setEnd(n, i + target.length);
+          const m = document.createElement("mark"); m.className="__ws __ws_focus";
+          r.surroundContents(m); m.scrollIntoView({ block:"center", inline:"center" });
           break;
         }
       }
