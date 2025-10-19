@@ -4,7 +4,6 @@ import crypto from "node:crypto";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const TABLE = process.env.LINKS_TABLE || "capture_links";
-const SCREENSHOTONE_KEY = process.env.SCREENSHOTONE_KEY || "";
 
 const setCORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -15,18 +14,8 @@ const setCORS = (res) => {
 const looksDoubleEncoded = (s = "") => /https%253A|%252F|%25[0-9A-Fa-f]{2}/.test(s);
 const normalizeThumCrop = (url = "") => url.replace(/\/crop\/(\d+)x(\d+)(\/|$)/, "/crop/$2$3");
 
-function buildScreenshotURL(targetURL) {
-  if (SCREENSHOTONE_KEY) {
-    const u = new URL("https://api.screenshotone.com/take");
-    u.searchParams.set("access_key", SCREENSHOTONE_KEY);
-    u.searchParams.set("url", targetURL.toString());
-    u.searchParams.set("format", "jpeg");
-    u.searchParams.set("viewport_width", "1280");
-    u.searchParams.set("viewport_height", "720");
-    u.searchParams.set("block_ads", "true");
-    u.searchParams.set("cache", "true");
-    return { url: u.toString(), provider: "screenshotone" };
-  }
+function pageScreenshotURL(targetURL) {
+  // Page entière : thum.io (simple/rapide)
   const safe = targetURL.toString().replace(/#/g, "%23");
   const thum = `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`;
   return { url: thum, provider: "thum.io" };
@@ -61,7 +50,7 @@ export default async function handler(req, res) {
       return res.json({ ok: true, imageUrl: normalized, provider: "cache", cached: true });
     }
 
-    const { url: imageUrlRaw, provider } = buildScreenshotURL(target);
+    const { url: imageUrlRaw, provider } = pageScreenshotURL(target);
     const imageUrl = normalizeThumCrop(imageUrlRaw);
 
     const { error: upErr } = await supabase.from(TABLE).upsert({
