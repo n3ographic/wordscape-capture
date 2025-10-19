@@ -1,6 +1,5 @@
 // /api/capture.js
-import chromium from "@sparticuz/chromium";
-import puppeteer from "puppeteer-core";
+// POST { url, term } -> image/jpeg (surligne via #:~:text=TERM et capture via Microlink)
 
 const cors = (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -12,59 +11,48 @@ const cors = (req, res) => {
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST")   return res.status(405).send("POST only");
+  if (req.method !== "POST") return res.status(405).send("POST only");
 
-  const { url, term } = req.body || {};
-  if (!url || !term) return res.status(400).send("Missing url or term");
-
-  let browser;
   try {
-    const executablePath = await chromium.executablePath();
+    const { url, term } = req.body || {};
+    if (!url || !term) return res.status(400).send("Missing url or term");
 
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath,
-      headless: chromium.headless,
-      defaultViewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
-      // 🔑 indispensable pour que Chromium trouve libnss3.so & co
-      env: { ...process.env, ...chromium.env },
-    });
+    // 1) Construit l’URL cible avec highlight (Chrome)
+    const cleanTerm = String(term).trim().replace(/\s+/g, " ");
+    const target = new URL(url);
+    target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
 
-    const page = await browser.newPage();
-    const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
-    if (!resp?.ok()) throw new Error(`Failed to load ${url} (status ${resp ? resp.status() : "?"})`);
+    // 2) Appelle Microlink pour obtenir une capture
+    //    Pas de clé nécessaire pour tester (limites de quota). Pour prod, prends une clé puis proxifie côté serveur.
+    const api = new URL("https://api.microlink.io/");
+    api.searchParams.set("url", target.toString());
+    api.searchParams.set("screenshot", "true");
+    api.searchParams.set("meta", "false");
+    api.searchParams.set("screenshot.type", "jpeg");
+    api.searchParams.set("screenshot.device", "desktop");
+    api.searchParams.set("screenshot.viewport.width", "1280");
+    api.searchParams.set("screenshot.viewport.height", "720");
+    api.searchParams.set("waitForTimeout", "800"); // petite pause pour laisser le highlight apparaître
 
-    await page.addStyleTag({
-      content: `
-        mark.__ws{background:#ffeb3b;padding:.1em .25em;border-radius:.2em}
-        .__ws_focus{outline:4px solid #ff9800;outline-offset:4px}
-      `
-    });
+    const r = await fetch(api.toString());
+    const j = await r.json();
+    const imgUrl = j?.data?.screenshot?.url;
+    if (!r.ok || !imgUrl) {
+      return res
+        .status(502)
+        .send(j?.error?.message || "Failed to capture screenshot.");
+    }
 
-    await page.evaluate((needle) => {
-      const norm = (s) => s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
-      const target = norm(needle);
-      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      const r = document.createRange();
-      while (w.nextNode()) {
-        const n = w.currentNode, t = n.nodeValue || "", i = norm(t).indexOf(target);
-        if (i >= 0) {
-          r.setStart(n, i); r.setEnd(n, i + target.length);
-          const m = document.createElement("mark"); m.className="__ws __ws_focus";
-          r.surroundContents(m); m.scrollIntoView({ block:"center", inline:"center" });
-          break;
-        }
-      }
-    }, term);
-
-    await page.waitForTimeout(250);
-    const buf = await page.screenshot({ type: "jpeg", quality: 80 });
+    // 3) Récupère l’image et la renvoie en binaire
+    const imgRes = await fetch(imgUrl);
+    if (!imgRes.ok) {
+      return res.status(502).send("Upstream image fetch failed.");
+    }
+    const buf = Buffer.from(await imgRes.arrayBuffer());
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "no-store");
-    res.send(buf);
+    return res.send(buf);
   } catch (e) {
-    res.status(500).send(String(e?.message || e));
-  } finally {
-    try { await browser?.close(); } catch {}
+    return res.status(500).send(String(e?.message || e));
   }
 }
