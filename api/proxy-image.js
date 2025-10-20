@@ -1,4 +1,3 @@
-// GET /api/proxy-image?src=<image-url-encodée>
 const CORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -6,7 +5,6 @@ const CORS = (res) => {
   res.setHeader("Access-Control-Max-Age", "600");
 };
 
-// autorise par suffixe de domaine (plus robuste : *microlink.io, *thum.io, *screenshotone.com)
 const ALLOW_SUFFIX = ["microlink.io", "thum.io", "screenshotone.com"];
 
 export default async function handler(req, res) {
@@ -16,7 +14,6 @@ export default async function handler(req, res) {
 
   const raw = req.query.src;
   if (!raw) return res.status(400).send("Missing src");
-
   let decoded = Array.isArray(raw) ? raw[0] : raw;
   try { decoded = decodeURIComponent(decoded); } catch {}
 
@@ -26,11 +23,11 @@ export default async function handler(req, res) {
   if (!okHost) return res.status(400).send("Host not allowed");
 
   try {
-    const headers = {
-      "User-Agent": req.headers["user-agent"] || "Mozilla/5.0"
-      // Si un jour tu ajoutes MICROLINK_KEY payant, tu peux décommenter :
-      // ...(u.hostname.endsWith("microlink.io") && process.env.MICROLINK_KEY ? { "x-api-key": process.env.MICROLINK_KEY } : {})
-    };
+    const headers = { "User-Agent": req.headers["user-agent"] || "Mozilla/5.0" };
+    // Si un jour tu ajoutes MICROLINK_API_KEY (plan payant) :
+    if ((u.hostname.endsWith("microlink.io")) && process.env.MICROLINK_API_KEY) {
+      headers["x-api-key"] = process.env.MICROLINK_API_KEY;
+    }
 
     const ctrl = new AbortController();
     const id = setTimeout(() => ctrl.abort(), 15000);
@@ -46,8 +43,8 @@ export default async function handler(req, res) {
     res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
 
     const buf = Buffer.from(await r.arrayBuffer());
-    return res.status(200).send(buf);
+    res.status(200).send(buf);
   } catch (e) {
-    return res.status(502).send(String(e?.message || e));
+    res.status(502).send(String(e?.message || e));
   }
 }
