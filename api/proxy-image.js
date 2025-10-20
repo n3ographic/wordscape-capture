@@ -1,50 +1,76 @@
-const CORS = (res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Max-Age", "600");
-};
+// api/proxy-image.js
+import { withCors } from './_cors.js'; // si ton _cors expose autre chose, adapte la ligne
+// Si tu n’as pas de helper CORS, enlève withCors et renvoie les en-têtes CORS ci-dessous à la main.
 
-const ALLOW_SUFFIX = ["microlink.io", "thum.io", "screenshotone.com"];
+const ALLOW = [
+  'image.thum.io',
+  'api.microlink.io',
+  'microlink.io',
+  // CDNs Microlink les plus fréquents
+  'iad.microlink.io',
+  'sfo.microlink.io',
+  'cdg.microlink.io',
+  'ewr.microlink.io',
+  'fra.microlink.io',
+  // au cas où d’autres pops soient ajoutés
+  '.microlink.io'
+];
+
+function isAllowed(hostname) {
+  return ALLOW.some(a =>
+    a.startsWith('.') ? hostname.endsWith(a) : hostname === a
+  );
+}
 
 export default async function handler(req, res) {
-  CORS(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "GET") return res.status(405).send("GET only");
-
-  const raw = req.query.src;
-  if (!raw) return res.status(400).send("Missing src");
-  let decoded = Array.isArray(raw) ? raw[0] : raw;
-  try { decoded = decodeURIComponent(decoded); } catch {}
-
-  let u;
-  try { u = new URL(decoded); } catch { return res.status(400).send("Invalid src"); }
-  const okHost = ALLOW_SUFFIX.some(sfx => u.hostname === sfx || u.hostname.endsWith(`.${sfx}`));
-  if (!okHost) return res.status(400).send("Host not allowed");
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '600');
+    return res.status(204).end();
+  }
 
   try {
-    const headers = { "User-Agent": req.headers["user-agent"] || "Mozilla/5.0" };
-    // Si un jour tu ajoutes MICROLINK_API_KEY (plan payant) :
-    if ((u.hostname.endsWith("microlink.io")) && process.env.MICROLINK_API_KEY) {
-      headers["x-api-key"] = process.env.MICROLINK_API_KEY;
-    }
+    const raw = (req.query?.src ?? req.body?.src ?? '').toString();
+    if (!raw) return bad(res, 400, 'Missing src');
 
-    const ctrl = new AbortController();
-    const id = setTimeout(() => ctrl.abort(), 15000);
-    const r = await fetch(u.toString(), { signal: ctrl.signal, headers });
-    clearTimeout(id);
+    // Certaines sources arrivent déjà encodées; normalisons
+    let src = raw;
+    try { src = decodeURIComponent(raw); } catch (_) {} // si déjà décodé, pas grave
 
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      return res.status(r.status).send(text || `Upstream ${r.status}`);
-    }
+    let url;
+    try { url = new URL(src); } catch (e) { return bad(res, 400, 'Bad src'); }
 
-    res.setHeader("Cache-Control", "public, max-age=0, s-maxage=86400, stale-while-revalidate=604800");
-    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
+    if (!/^https?:$/.test(url.protocol)) return bad(res, 400, 'Only http(s) allowed');
+    if (!isAllowed(url.hostname)) return bad(res, 400, `Host not allowed: ${url.hostname}`);
 
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.status(200).send(buf);
-  } catch (e) {
-    res.status(502).send(String(e?.message || e));
+    const up = await fetch(url.toString(), {
+      redirect: 'follow',
+      headers: {
+        // encourage le binaire
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'User-Agent': 'wordscape-proxy/1.0 (+vercel)'
+      }
+    });
+
+    if (!up.ok) return bad(res, up.status, `Upstream ${up.status}`);
+
+    // On relaie le content-type si présent, sinon image/png
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, s-maxage=86400, stale-while-revalidate=604800');
+    res.setHeader('Content-Type', up.headers.get('content-type') || 'image/png');
+
+    // Stream direct
+    up.body.pipe(res);
+  } catch (err) {
+    return bad(res, 500, 'Proxy error');
   }
+}
+
+function bad(res, code, msg) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.status(code).end(JSON.stringify({ ok: false, error: msg }));
 }
