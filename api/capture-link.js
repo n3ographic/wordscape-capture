@@ -1,9 +1,5 @@
-import { createClient } from "@supabase/supabase-js";
 import crypto from "node:crypto";
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const TABLE = process.env.LINKS_TABLE || "capture_links";
+import { createClient } from "@supabase/supabase-js";
 
 const setCORS = (res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -11,14 +7,10 @@ const setCORS = (res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "600");
 };
-const looksDoubleEncoded = (s = "") => /https%253A|%252F|%25[0-9A-Fa-f]{2}/.test(s);
-const normalizeThumCrop = (url = "") => url.replace(/\/crop\/(\d+)x(\d+)(\/|$)/, "/crop/$2$3");
 
-function pageScreenshotURL(targetURL) {
-  // Page entière : thum.io (simple/rapide)
+function thumUrl(targetURL) {
   const safe = targetURL.toString().replace(/#/g, "%23");
-  const thum = `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`;
-  return { url: thum, provider: "thum.io" };
+  return `https://image.thum.io/get/width/1280/crop/720/noanimate/${safe}`;
 }
 
 export default async function handler(req, res) {
@@ -26,40 +18,47 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method === "GET") return res.status(200).json({ ok: true, route: "capture-link", tip: "POST { url, term }" });
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) return res.status(500).json({ ok: false, error: "Missing SUPABASE envs" });
 
   try {
-    const { url, term, force } = req.body || {};
+    const { url, term, force = false } = req.body || {};
     if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
 
-    const cleanTerm = String(term).trim().replace(/\s+/g, " ");
+    // prépare l’URL avec ancre simple sur le terme (utile si le site supporte :~:text)
     const target = new URL(url);
-    target.hash = `:~:text=${encodeURIComponent(cleanTerm)}`;
+    target.hash = `:~:text=${encodeURIComponent(String(term).trim())}`;
 
-    const urlHash = crypto.createHash("md5").update(`${url}::${cleanTerm}`).digest("hex");
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
+    const imageUrl = thumUrl(target);
 
-    let cached;
+    const hasSupabase =
+      process.env.SUPABASE_URL &&
+      (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
+
+    if (!hasSupabase) {
+      return res.json({ ok: true, imageUrl, provider: "thum.io", cached: false });
+    }
+
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+    const supabase = createClient(process.env.SUPABASE_URL, key, { auth: { persistSession: false } });
+    const urlHash = crypto.createHash("md5").update(`${url}::${term}`).digest("hex");
+    const table = process.env.SUPABASE_TABLE_CAPTURES || "captures";
+
     if (!force) {
-      const { data: row } = await supabase.from(TABLE).select("image_url").eq("url_hash", urlHash).maybeSingle();
-      cached = row?.image_url;
-    }
-    if (cached && !looksDoubleEncoded(cached)) {
-      const normalized = normalizeThumCrop(cached);
-      if (normalized !== cached) await supabase.from(TABLE).update({ image_url: normalized }).eq("url_hash", urlHash);
-      return res.json({ ok: true, imageUrl: normalized, provider: "cache", cached: true });
+      const { data: row } = await supabase.from(table).select("image_url").eq("id", urlHash).maybeSingle();
+      if (row?.image_url) {
+        return res.json({ ok: true, imageUrl: row.image_url, provider: "cache", cached: true });
+      }
     }
 
-    const { url: imageUrlRaw, provider } = pageScreenshotURL(target);
-    const imageUrl = normalizeThumCrop(imageUrlRaw);
-
-    const { error: upErr } = await supabase.from(TABLE).upsert({
-      url_hash: urlHash, url, term: cleanTerm, image_url: imageUrl
+    await supabase.from(table).upsert({
+      id: urlHash,
+      url,
+      term,
+      image_url: imageUrl,
+      provider: "thum.io"
     });
-    if (upErr) return res.status(502).json({ ok: false, error: upErr.message });
 
-    return res.json({ ok: true, imageUrl, provider, cached: false });
+    res.json({ ok: true, imageUrl, provider: "thum.io", cached: false });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
