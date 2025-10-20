@@ -1,43 +1,87 @@
 // api/capture-link.js
-import { cors, ok, bad } from "./_utils.js";
-import { microlinkShotUrl, thumioShotUrl } from "./_microlink.js";
+export const config = { runtime: "edge" };
 
-export default async function handler(req, res) {
-  cors(res, "*");
+const VIEW_W = 1280;
+const VIEW_H = 720;
 
+// jaune pétant + petit halo
+const HILITE_CSS = `
+  ::target-text{
+    background: #fff44b !important;
+    box-shadow: 0 0 0 6px rgba(255,244,75,.85) !important;
+    border-radius: 4px !important;
+    color: inherit !important;
+  }
+`;
+
+function buildTextFragment(term) {
+  // basique: cible uniquement le mot (ça marche bien sur Wikipédia)
+  // si tu veux désambiguïser, tu peux construire "prefix-,term,-suffix"
+  return `#:~:text=${encodeURIComponent(term)}`;
+}
+
+function microlinkShot(pageUrlWithFragment) {
+  const u = new URL("https://api.microlink.io/");
+  u.searchParams.set("url", pageUrlWithFragment);
+  u.searchParams.set("screenshot", "true");
+  u.searchParams.set("meta", "false");
+  u.searchParams.set("embed", "screenshot.url");
+  u.searchParams.set("waitUntil", "networkidle2");
+  u.searchParams.set("viewport.width", String(VIEW_W));
+  u.searchParams.set("viewport.height", String(VIEW_H));
+  // essaie de centrer l’élément ciblé par le fragment
+  u.searchParams.set("scrollTo", ":target-text");
+  u.searchParams.set("scrollBehavior", "center");
+  // renforce la couleur de highlight
+  u.searchParams.set("styles", HILITE_CSS);
+  // force un rendu image (au cas où)
+  u.searchParams.set("as", "image");
+  return u.toString();
+}
+
+export default async function handler(req) {
   if (req.method === "OPTIONS") {
-    res.statusCode = 204;
-    return res.end();
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET,POST,OPTIONS",
+        "access-control-allow-headers": "Content-Type, Authorization",
+        "access-control-max-age": "600",
+      },
+    });
   }
 
-  if (req.method === "GET") {
-    return ok(res, { ok: true, route: "capture-link", tip: "Use POST { url, term, index? }" });
+  const { url, term } = await req.json().catch(() => ({}));
+
+  if (!url || !term) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "Missing { url, term }" }),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "access-control-allow-origin": "*",
+        },
+      }
+    );
   }
 
-  if (req.method !== "POST") {
-    return bad(res, "Method not allowed", 405);
-  }
+  const withFragment = url + buildTextFragment(term);
+  const shotUrl = microlinkShot(withFragment);
 
-  try {
-    const { url, term, index = 1, provider = "microlink" } =
-      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
-
-    if (!url || !term) return bad(res, "Missing 'url' or 'term'");
-
-    let imageUrl = microlinkShotUrl(url, term, index);
-    let used = "microlink";
-
-    // (Optionnel) petit test HEAD pour basculer en fallback si nécessaire
-    // try {
-    //   const r = await fetch(imageUrl, { method: "HEAD" });
-    //   if (!r.ok) throw new Error();
-    // } catch {
-    //   imageUrl = thumioShotUrl(url, term);
-    //   used = "thum.io";
-    // }
-
-    return ok(res, { ok: true, imageUrl, provider: used, index: Number(index) });
-  } catch (err) {
-    return bad(res, err?.message || "Unexpected error", 500);
-  }
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      imageUrl: shotUrl,          // tu continues à passer par /api/proxy-image côté Framer
+      provider: "microlink",
+      target: withFragment,
+    }),
+    {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+      },
+    }
+  );
 }
