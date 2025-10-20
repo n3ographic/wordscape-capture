@@ -1,32 +1,43 @@
-import { setCORS, okOptions } from "./_cors.js";
-
-const buildMicrolinkShot = (targetUrl) => {
-  // Microlink renvoie une page JSON; pour avoir *directement* l’URL d’image, on utilise embed=screenshot.url
-  const u = new URL("https://api.microlink.io/");
-  u.searchParams.set("url", targetUrl);
-  u.searchParams.set("screenshot", "true");
-  u.searchParams.set("meta", "false");
-  u.searchParams.set("embed", "screenshot.url");
-  u.searchParams.set("waitUntil", "networkidle2");
-  u.searchParams.set("viewport.width", "1280");
-  u.searchParams.set("viewport.height", "720");
-  return u.toString();
-};
+// api/capture-link.js
+import { cors, ok, bad } from "./_utils.js";
+import { microlinkShotUrl, thumioShotUrl } from "./_microlink.js";
 
 export default async function handler(req, res) {
-  if (okOptions(req, res)) return;
-  setCORS(res);
+  cors(res, "*");
 
-  if (req.method !== "POST")
-    return res.status(405).json({ ok: false, error: "POST only" });
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
 
-  const { url, term } = req.body || {};
-  if (!url || !term) return res.status(400).json({ ok: false, error: "Missing url or term" });
+  if (req.method === "GET") {
+    return ok(res, { ok: true, route: "capture-link", tip: "Use POST { url, term, index? }" });
+  }
 
-  // Text Fragment pour surligner le mot (toutes occurrences par défaut)
-  const anchored = new URL(url);
-  anchored.hash = `:~:text=${encodeURIComponent(term)}`;
+  if (req.method !== "POST") {
+    return bad(res, "Method not allowed", 405);
+  }
 
-  const imageUrl = buildMicrolinkShot(anchored.toString());
-  return res.status(200).json({ ok: true, imageUrl, provider: "microlink" });
+  try {
+    const { url, term, index = 1, provider = "microlink" } =
+      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+
+    if (!url || !term) return bad(res, "Missing 'url' or 'term'");
+
+    let imageUrl = microlinkShotUrl(url, term, index);
+    let used = "microlink";
+
+    // (Optionnel) petit test HEAD pour basculer en fallback si nécessaire
+    // try {
+    //   const r = await fetch(imageUrl, { method: "HEAD" });
+    //   if (!r.ok) throw new Error();
+    // } catch {
+    //   imageUrl = thumioShotUrl(url, term);
+    //   used = "thum.io";
+    // }
+
+    return ok(res, { ok: true, imageUrl, provider: used, index: Number(index) });
+  } catch (err) {
+    return bad(res, err?.message || "Unexpected error", 500);
+  }
 }
