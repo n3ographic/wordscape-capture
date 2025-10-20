@@ -1,35 +1,73 @@
-import { setCORS, okOptions } from "./_cors.js";
+export const config = { runtime: 'nodejs' };
+
+const getEnv = () => {
+  const CX =
+    process.env.CSE_CX ||
+    process.env.GOOGLE_CSE_ID ||
+    process.env.SEARCH_CX ||
+    '';
+
+  const KEY =
+    process.env.CSE_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.NEXT_PUBLIC_GOOGLE_API_KEY ||
+    '';
+
+  return { CX: CX?.trim(), KEY: KEY?.trim() };
+};
+
+const cors = (res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '600');
+};
 
 export default async function handler(req, res) {
-  if (okOptions(req, res)) return;
-  setCORS(res);
+  cors(res);
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
-  if (req.method !== "GET")
-    return res.status(405).json({ ok: false, error: "GET only" });
+  const { CX, KEY } = getEnv();
+  if (!CX || !KEY) {
+    return res
+      .status(200)
+      .json({ ok: false, error: 'CSE not configured', hasCX: !!CX, hasKEY: !!KEY });
+  }
 
-  const {
-    q,
-    num = "5",
-    lang = "fr",
-    site // ex: fr.wikipedia.org
-  } = req.query;
+  try {
+    const q = (req.query.q || '').toString();
+    const num = Math.min(parseInt(req.query.num || '5', 10), 10);
+    const lang = (req.query.lang || 'fr').toString();
+    const site = (req.query.site || '').toString(); // ex: fr.wikipedia.org
 
-  if (!q) return res.status(400).json({ ok: false, error: "Missing q" });
+    if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
 
-  const key = process.env.GOOGLE_CSE_KEY;
-  const cx  = process.env.GOOGLE_CSE_ID;
-  if (!key || !cx) return res.status(500).json({ ok: false, error: "CSE not configured" });
+    const params = new URLSearchParams({
+      key: KEY,
+      cx: CX,
+      q,
+      num: String(num),
+      lr: lang ? `lang_${lang}` : '',
+      safe: 'off',
+    });
 
-  const params = new URLSearchParams({
-    key, cx, q, num: String(num), lr: `lang_${lang}`
-  });
-  if (site) params.set("siteSearch", site);
+    if (site) params.set('q', `${q} site:${site}`);
 
-  const url = `https://www.googleapis.com/customsearch/v1?${params}`;
-  const r = await fetch(url);
-  if (!r.ok) return res.status(r.status).json({ ok: false, error: await r.text() });
-  const json = await r.json();
+    const url = `https://customsearch.googleapis.com/customsearch/v1?${params.toString()}`;
+    const r = await fetch(url);
+    const data = await r.json();
 
-  const urls = (json.items || []).map(i => i.link);
-  return res.status(200).json({ ok: true, q, count: urls.length, urls });
+    if (data.error) {
+      return res.status(200).json({ ok: false, error: data.error.message || 'CSE error' });
+    }
+
+    const urls =
+      (data.items || [])
+        .map((it) => it.link)
+        .filter(Boolean);
+
+    return res.status(200).json({ ok: true, q, count: urls.length, urls });
+  } catch (e) {
+    return res.status(200).json({ ok: false, error: e.message || 'Unknown error' });
+  }
 }
