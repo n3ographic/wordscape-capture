@@ -1,7 +1,7 @@
-// api/occurrence-links.js
-export const config = { runtime: "edge" };
+// /api/occurrence-links.js
+import { withCors } from './_cors.js';
 
-const YELLOW_CSS = `
+const HIGHLIGHT_CSS = `
   ::target-text{
     background:#fff44b !important;
     box-shadow:0 0 0 6px rgba(255,244,75,.85) !important;
@@ -11,68 +11,73 @@ const YELLOW_CSS = `
   }
 `;
 
-function corsJSON(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type",
-      "cache-control": "public, max-age=0, must-revalidate",
-    },
+function buildMicrolink(url, fragment) {
+  const qs = new URLSearchParams({
+    url,
+    screenshot: 'true',
+    meta: 'false',
+    embed: 'screenshot.url',
+    waitUntil: 'networkidle2',
+    'viewport.width': '1280',
+    'viewport.height': '720',
+    scrollTo: ':target-text',
+    scrollBehavior: 'center',
+    styles: HIGHLIGHT_CSS,
+    as: 'image',
   });
+  return `https://api.microlink.io/?${qs.toString()}`;
 }
 
-export default async function handler(req) {
-  if (req.method === "OPTIONS") return corsJSON("", 204);
-  if (req.method !== "POST") {
-    return corsJSON({ ok: false, error: "method not allowed" }, 405);
-  }
+export default withCors(async function handler(req, res) {
+  try {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ ok: false, error: 'Use POST' });
+    }
 
-  let body = {};
-  try { body = await req.json(); } catch {}
-  const { url, term, max = 6 } = body;
+    // body peut déjà être parsé par Vercel; sécurisons:
+    const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
 
-  if (!url || !term) {
-    return corsJSON({ ok: false, error: "missing url or term" }, 400);
-  }
+    const pageUrl = String(body.url || '').trim();
+    const term    = String(body.term || '').trim();
+    const max     = Math.min(Number(body.max || 6) || 6, 20);
 
-  // On utilise :target-text pour chaque occurrence; on limite à "max"
-  const encodedFragment = (before, target, after) =>
-    `:~:text=${encodeURIComponent(before)}-,${encodeURIComponent(target)},-${encodeURIComponent(after)}`;
+    if (!pageUrl || !term) {
+      return res.status(400).json({ ok: false, error: 'Missing `url` or `term`' });
+    }
 
-  // Approche simple : on laisse Microlink scroller vers :target-text au centre
-  // et on surcharge le style pour le surlignage.
-  const buildImageUrl = (targetUrl) =>
-    `https://api.microlink.io/?url=${encodeURIComponent(targetUrl)}\
-&screenshot=true&meta=false&embed=screenshot.url\
-&waitUntil=networkidle2&viewport.width=1280&viewport.height=720\
-&scrollTo=%3Atarget-text&scrollBehavior=center\
-&styles=${encodeURIComponent(YELLOW_CSS)}&as=image`;
+    // Valide/normalise l’URL (peut throw -> catch)
+    const u = new URL(pageUrl);
+    const normalized = u.toString();
 
-  // On s'appuie ici sur le surlignage natif de Chrome/Wikipedia,
-  // on génère jusqu'à "max" variantes de fragments.
-  // NB: pour un découpage "before/after" plus fin, tu peux parser le HTML côté serveur.
-  const items = [];
-  for (let i = 1; i <= max; i++) {
-    const frag = `:~:text=${encodeURIComponent(term)}`;
-    const targetUrl = url.includes("#")
-      ? url + encodeURIComponent(` ${frag}`)
-      : `${url}#${frag}`;
+    // Ici, sans crawler, on ne peut pas calculer les vrais contextes.
+    // On génère jusqu’à `max` occurrences avec le même fragment text-fragment
+    // (le rendu sera centré et surligné, c'est ce que tu veux visuellement).
+    const fragment = `:~:text=${encodeURIComponent(term)}`;
+    const items = Array.from({ length: max }, (_, i) => {
+      const urlWithFragment = `${normalized}${normalized.includes('#') ? '' : ''}#${fragment}`;
+      return {
+        index: i + 1,
+        url: urlWithFragment,
+        term,
+        imageUrl: buildMicrolink(urlWithFragment, fragment),
+        fallbackUrl: `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(urlWithFragment)}`,
+        fragment,
+        provider: 'microlink',
+      };
+    });
 
-    items.push({
-      index: i,
-      url: targetUrl,
+    return res.status(200).json({
+      ok: true,
+      count: items.length,
       term,
-      imageUrl: buildImageUrl(targetUrl),
-      fallbackUrl: `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(
-        targetUrl
-      )}`,
-      fragment: frag,
-      provider: "microlink",
+      url: normalized,
+      items,
+    });
+  } catch (err) {
+    // <- Jamais de 500 côté client; on renvoie une 200 avec ok:false
+    return res.status(200).json({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
     });
   }
-
-  return corsJSON({ ok: true, count: items.length, term, url, items });
-}
+});
