@@ -1,127 +1,85 @@
 // /api/occurrence-links.js
 import { withCors } from './_cors.js';
 
-/**
- * Escape RegExp special chars
- */
-const escReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/* CSS injecté dans la page avant la capture (compact = URL plus courte) */
+const HIGHLIGHT_CSS =
+  'mark.__w{background:#fff44b!important;box-shadow:0 0 0 6px rgba(255,244,75,.85)!important;border-radius:6px!important;padding:0 .2em;color:inherit!important;text-shadow:none!important}';
 
-/**
- * Build a Microlink screenshot URL that:
- *  - injecte du CSS (surlignage jaune)
- *  - injecte du JS (wrap <mark> autour des occurrences + centre l’occurrence ciblée)
- *  - effectue un léger zoom visuel via transform sur le <mark>
- *
- * @param {string} url  - page à capturer
- * @param {string} term - mot/terme à surligner
- * @param {number} focusIndex - index (0-based) de l’occurrence à centrer
- * @param {number} zoom - facteur de zoom visuel appliqué au <mark>
- */
-function buildMicrolink(url, term, focusIndex = 0, zoom = 1.35) {
-  const STYLES = `
-.ws-highlight{
-  background:#fff44b !important;
-  box-shadow:0 0 0 6px rgba(255,244,75,.78) !important;
-  border-radius:6px !important;
-  padding:.05em .18em;
-  display:inline-block;
-  transform:scale(${zoom});
-  transform-origin:center;
-  color:inherit !important;
-  text-shadow:none !important;
-}
-  `.trim();
+/* Petit helper pour échapper le terme dans une RegExp côté page */
+const ESC_RE =
+  "function __esc(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}";
 
-  const SCRIPTS = `
-(()=>{try{
-  const term = ${JSON.stringify(term)};
-  const re = new RegExp(${JSON.stringify(escReg(term))}, 'gi');
-
-  const walker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node){
-        const p = node.parentElement;
-        if(!p) return NodeFilter.FILTER_REJECT;
-        // on évite les zones non pertinentes
-        if(/^(SCRIPT|STYLE|NOSCRIPT|SVG|CANVAS|IFRAME|CODE|PRE)$/i.test(p.tagName))
-          return NodeFilter.FILTER_REJECT;
-        if(!node.nodeValue || !re.test(node.nodeValue))
-          return NodeFilter.FILTER_SKIP;
-        re.lastIndex = 0;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    }
-  );
-
-  const candidates = [];
-  while(walker.nextNode()) candidates.push(walker.currentNode);
-
-  for(const textNode of candidates){
-    const html = textNode.nodeValue.replace(re, m => '<mark class="ws-highlight">'+m+'</mark>');
-    const span = document.createElement('span');
-    span.innerHTML = html;
-    textNode.parentNode.replaceChild(span, textNode);
-  }
-
-  const els = document.querySelectorAll('.ws-highlight');
-  const idx = Math.max(0, Math.min(${Number(focusIndex)}, els.length - 1));
-  const target = els[idx] || els[0];
-  if(target){
-    target.scrollIntoView({block:'center', inline:'center'});
-  }
-}catch(e){/* silent */}})();
-  `.trim();
+/* Construit l’URL Microlink qui :
+   - charge la page,
+   - injecte CSS + script d’annotation <mark>,
+   - centre la 1re occurrence,
+   - renvoie l’URL du screenshot.
+*/
+function buildMicrolinkUrl(pageUrl, term) {
+  // Script minifié exécuté avant capture
+  const script =
+    `(()=>{${ESC_RE};try{var t=${JSON.stringify(term)};` +
+    `var re=new RegExp(__esc(t),'gi');` +
+    `var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);` +
+    `var first=null;while(w.nextNode()){var n=w.currentNode;` +
+    `if(!n.nodeValue||!n.nodeValue.trim())continue;` +
+    `if(!re.test(n.nodeValue))continue;` +
+    `var html=n.nodeValue.replace(re,'<mark class=__w>$&</mark>');` +
+    `var d=document.createElement('div');d.innerHTML=html;` +
+    `var f=document.createDocumentFragment();while(d.firstChild)f.appendChild(d.firstChild);` +
+    `n.parentNode.replaceChild(f,n);if(!first)first=document.querySelector('mark.__w');}` +
+    `if(first)first.scrollIntoView({block:'center',inline:'nearest'});}` +
+    `catch(e){}})();`;
 
   const qs = new URLSearchParams({
-    url,
+    url: pageUrl,                 // page cible
     screenshot: 'true',
     meta: 'false',
-    embed: 'screenshot.url',
+    embed: 'screenshot.url',      // on veut l’URL du screenshot
     waitUntil: 'networkidle2',
     'viewport.width': '1280',
     'viewport.height': '720',
-    styles: STYLES,
-    scripts: SCRIPTS,
+    styles: HIGHLIGHT_CSS,
+    scripts: script,
     as: 'image'
   });
 
   return `https://api.microlink.io/?${qs.toString()}`;
 }
 
-export default withCors(async function handler(req, res) {
+/* Fallback simple si Microlink échoue (pas de surlignage ici) */
+function buildFallback(pageUrl) {
+  return `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(pageUrl)}`;
+}
+
+export default withCors(async (req, res) => {
   try {
     if (req.method !== 'POST') {
       return res.status(405).json({ ok: false, error: 'Use POST' });
     }
 
     const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
-
     const pageUrl = String(body.url || '').trim();
     const term    = String(body.term || '').trim();
     const max     = Math.min(Number(body.max || 6) || 6, 20);
-    const zoom    = Math.max(1, Math.min(Number(body.zoom || 1.35) || 1.35, 2));
 
     if (!pageUrl || !term) {
       return res.status(400).json({ ok: false, error: 'Missing `url` or `term`' });
     }
 
-    // Valide et normalise
-    const u = new URL(pageUrl);
-    const normalized = u.toString();
+    // Normalise et valide l’URL
+    const normalized = new URL(pageUrl).toString();
 
-    // Génère `max` captures en centrant l’occurrence i (0-based) à chaque fois
+    // Sans crawler complet on ne calcule pas tous les offsets.
+    // On renvoie `max` éléments identiques (première occurrence centrée/surlignée).
     const items = Array.from({ length: max }, (_, i) => {
-      const imageUrl = buildMicrolink(normalized, term, i, zoom);
+      const imageUrl = buildMicrolinkUrl(normalized, term);
       return {
         index: i + 1,
         url: normalized,
         term,
         imageUrl,
-        // le fallback ne surlignera pas (secours simple)
-        fallbackUrl: `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(normalized)}`,
-        focus: i,           // occurrence centrée
+        fallbackUrl: buildFallback(normalized),
         provider: 'microlink'
       };
     });
@@ -134,9 +92,6 @@ export default withCors(async function handler(req, res) {
       items
     });
   } catch (err) {
-    return res.status(200).json({
-      ok: false,
-      error: String(err && err.message ? err.message : err)
-    });
+    return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 });
