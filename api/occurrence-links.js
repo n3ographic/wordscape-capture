@@ -1,54 +1,31 @@
 // /api/occurrence-links.js
 import { withCors } from './_cors.js';
 
-/* CSS injecté dans la page avant la capture (compact = URL plus courte) */
+const ORIGIN =
+  process.env.APP_ORIGIN || 'https://wordscape-capture.vercel.app';
+
+// CSS du <mark> dans la page capturée (compact)
 const HIGHLIGHT_CSS =
   'mark.__w{background:#fff44b!important;box-shadow:0 0 0 6px rgba(255,244,75,.85)!important;border-radius:6px!important;padding:0 .2em;color:inherit!important;text-shadow:none!important}';
 
-/* Petit helper pour échapper le terme dans une RegExp côté page */
-const ESC_RE =
-  "function __esc(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}";
-
-/* Construit l’URL Microlink qui :
-   - charge la page,
-   - injecte CSS + script d’annotation <mark>,
-   - centre la 1re occurrence,
-   - renvoie l’URL du screenshot.
-*/
-function buildMicrolinkUrl(pageUrl, term) {
-  // Script minifié exécuté avant capture
-  const script =
-    `(()=>{${ESC_RE};try{var t=${JSON.stringify(term)};` +
-    `var re=new RegExp(__esc(t),'gi');` +
-    `var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);` +
-    `var first=null;while(w.nextNode()){var n=w.currentNode;` +
-    `if(!n.nodeValue||!n.nodeValue.trim())continue;` +
-    `if(!re.test(n.nodeValue))continue;` +
-    `var html=n.nodeValue.replace(re,'<mark class=__w>$&</mark>');` +
-    `var d=document.createElement('div');d.innerHTML=html;` +
-    `var f=document.createDocumentFragment();while(d.firstChild)f.appendChild(d.firstChild);` +
-    `n.parentNode.replaceChild(f,n);if(!first)first=document.querySelector('mark.__w');}` +
-    `if(first)first.scrollIntoView({block:'center',inline:'nearest'});}` +
-    `catch(e){}})();`;
-
-  const qs = new URLSearchParams({
-    url: pageUrl,                 // page cible
+function microlinkUrl(pageUrl, term) {
+  const params = new URLSearchParams({
+    url: pageUrl,
     screenshot: 'true',
     meta: 'false',
-    embed: 'screenshot.url',      // on veut l’URL du screenshot
+    embed: 'screenshot.url',
     waitUntil: 'networkidle2',
     'viewport.width': '1280',
     'viewport.height': '720',
     styles: HIGHLIGHT_CSS,
-    scripts: script,
     as: 'image'
   });
-
-  return `https://api.microlink.io/?${qs.toString()}`;
+  // Script d’annotation servi depuis TON app (URL très courte)
+  params.append('scripts', `${ORIGIN}/api/inject.js?term=${encodeURIComponent(term)}`);
+  return `https://api.microlink.io/?${params.toString()}`;
 }
 
-/* Fallback simple si Microlink échoue (pas de surlignage ici) */
-function buildFallback(pageUrl) {
+function fallbackUrl(pageUrl) {
   return `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(pageUrl)}`;
 }
 
@@ -57,7 +34,6 @@ export default withCors(async (req, res) => {
     if (req.method !== 'POST') {
       return res.status(405).json({ ok: false, error: 'Use POST' });
     }
-
     const body = typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
     const pageUrl = String(body.url || '').trim();
     const term    = String(body.term || '').trim();
@@ -67,19 +43,17 @@ export default withCors(async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing `url` or `term`' });
     }
 
-    // Normalise et valide l’URL
     const normalized = new URL(pageUrl).toString();
 
-    // Sans crawler complet on ne calcule pas tous les offsets.
-    // On renvoie `max` éléments identiques (première occurrence centrée/surlignée).
+    // Sans crawl complet on renvoie `max` fois la 1ʳᵉ occurrence (centrée)
     const items = Array.from({ length: max }, (_, i) => {
-      const imageUrl = buildMicrolinkUrl(normalized, term);
+      const imageUrl = microlinkUrl(normalized, term);
       return {
         index: i + 1,
         url: normalized,
         term,
-        imageUrl,
-        fallbackUrl: buildFallback(normalized),
+        imageUrl,                 // ➜ mets ça DIRECTEMENT dans <img src=...>
+        fallbackUrl: fallbackUrl(normalized),
         provider: 'microlink'
       };
     });
@@ -91,7 +65,7 @@ export default withCors(async (req, res) => {
       url: normalized,
       items
     });
-  } catch (err) {
-    return res.status(200).json({ ok: false, error: String(err?.message || err) });
+  } catch (e) {
+    return res.status(200).json({ ok: false, error: String(e?.message || e) });
   }
 });
