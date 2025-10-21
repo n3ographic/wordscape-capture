@@ -1,36 +1,15 @@
-// api/_cors.js
-export function withCORS(handler) {
+// /api/_cors.js
+export function withCors(handler) {
   return async (req, res) => {
-    // Autoriser toutes origines (tu peux restreindre à ton domaine framer si besoin)
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Vary", "Origin");
+    res.setHeader('Access-Control-Allow-Origin', '*'); // ou met ton domaine Framer
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '600');
 
-    // Méthodes autorisées
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-
-    // Reprendre exactement les en-têtes demandés par le préflight
-    const acrh = req.headers["access-control-request-headers"];
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      acrh ? acrh : "Content-Type, Authorization"
-    );
-
-    // Cache du préflight
-    res.setHeader("Access-Control-Max-Age", "600");
-
-    // Répondre OK au préflight
-    if (req.method === "OPTIONS") {
-      res.status(204).end();
+    if (req.method === 'OPTIONS') {
+      res.status(204).end(); // <- statut OK pour le pré-vol
       return;
     }
-
-    try {
-      await handler(req, res);
-    } catch (err) {
-      console.error("[API ERROR]", err);
-      if (!res.headersSent) {
-        res.status(500).json({ ok: false, error: "server_error" });
-      }
-    }
+    return handler(req, res);
   };
 }
