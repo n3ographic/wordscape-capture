@@ -1,82 +1,67 @@
 // /api/proxy-image.js
-// Proxie des images sans double-encodage et avec cache.
-// Autorise par défaut api.microlink.io et image.thum.io.
-// Met PROXY_ALLOW_ANY=1 pour autoriser tous les hôtes (moins sûr).
+import { withCors } from './_cors.js';
+import { Readable } from 'node:stream';
 
-const ALLOW_ANY = process.env.PROXY_ALLOW_ANY === "1";
-const ALLOWLIST = [
-  "api.microlink.io",
-  "image.thum.io",
-  // ajoute tes domaines si besoin
-];
+const ALLOW_HOSTS = new Set([
+  'api.microlink.io',
+  'image.thum.io',
+]);
 
-function multiDecode(input) {
-  let out = String(input || "");
-  // Décode 0..3 fois pour récupérer une URL double/triple-encodée (%2520 etc.)
-  for (let i = 0; i < 3; i++) {
-    try {
-      const dec = decodeURIComponent(out);
-      if (dec === out) break;
-      out = dec;
-    } catch {
-      break;
-    }
-  }
-  return out.trim();
-}
-
-function isAllowed(u) {
-  if (ALLOW_ANY) return true;
-  const host = u.hostname.toLowerCase();
-  return ALLOWLIST.some((h) => host === h || host.endsWith("." + h));
-}
-
-export default async function handler(req, res) {
-  // CORS basique + preflight
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Max-Age", "600");
-
-  if (req.method === "OPTIONS") return res.status(204).end();
-
+function decodeMaybeTwice(str) {
   try {
-    const raw = (req.query.src || req.query.url || "").toString();
-    if (!raw) return res.status(400).send("Missing src");
-
-    const decoded = multiDecode(raw);
-    const url = new URL(decoded);
-
-    if (!/^https?:$/.test(url.protocol)) return res.status(400).send("Only http/https");
-    if (!isAllowed(url)) return res.status(403).send("Host not allowed");
-
-    // Mode redirection rapide ? /api/proxy-image?src=...&redirect=1
-    if (req.query.redirect === "1") {
-      res.setHeader("Cache-Control", "public, s-maxage=86400, stale-while-revalidate=600");
-      return res.redirect(302, url.toString());
+    const once = decodeURIComponent(str);
+    try {
+      return decodeURIComponent(once);
+    } catch {
+      return once;
     }
-
-    // Sinon on stream l'image
-    const upstream = await fetch(url.toString(), {
-      redirect: "follow",
-      // pas de Referer pour éviter certains hotlinks
-      headers: { "User-Agent": "WordscapeProxy/1.0 (+vercel)" },
-    });
-
-    if (!upstream.ok) {
-      return res.status(upstream.status).send(`Upstream error ${upstream.status}`);
-    }
-
-    res.setHeader("Cache-Control", "public, s-maxage=86400, stale-while-revalidate=600");
-
-    const ct = upstream.headers.get("content-type");
-    if (ct) res.setHeader("Content-Type", ct);
-    const cd = upstream.headers.get("content-disposition");
-    if (cd) res.setHeader("Content-Disposition", cd);
-
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    return res.status(200).send(buf);
-  } catch (err) {
-    return res.status(400).send("Bad Request");
+  } catch {
+    return str;
   }
 }
+
+export default withCors(async function handler(req, res) {
+  try {
+    const { src = '', redirect = '1' } = req.query ?? {};
+    if (!src) return res.status(400).send('Missing src');
+
+    const decoded = decodeMaybeTwice(String(src));
+    let url;
+    try {
+      url = new URL(decoded);
+    } catch (e) {
+      return res.status(400).send('Invalid URL');
+    }
+
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return res.status(400).send('Invalid protocol');
+    }
+    if (!ALLOW_HOSTS.has(url.hostname)) {
+      return res.status(400).send('Host not allowed');
+    }
+
+    // cache agressif côté CDN
+    res.setHeader('Cache-Control', 'public, s-maxage=86400, stale-while-revalidate=600');
+
+    // chemin rapide : redirection 302 (meilleure perf)
+    if (redirect === '1') {
+      res.setHeader('Location', url.toString());
+      return res.status(302).end();
+    }
+
+    // chemin robuste : on stream l’upstream
+    const upstream = await fetch(url, { redirect: 'follow' });
+    const ct = upstream.headers.get('content-type') || 'image/jpeg';
+    const cl = upstream.headers.get('content-length');
+
+    res.status(upstream.status);
+    res.setHeader('Content-Type', ct);
+    if (cl) res.setHeader('Content-Length', cl);
+
+    if (!upstream.body) return res.end();
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    console.error('[proxy-image] error', err);
+    res.status(500).send('Upstream error');
+  }
+});
