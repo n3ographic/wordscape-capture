@@ -1,68 +1,36 @@
-// api/proxy-image.js
-export const config = { runtime: "edge" };
+import { withCORS } from './_cors';
 
-function tryDecode(s) {
-  try { return decodeURIComponent(s); } catch { return s; }
-}
-
-export default async function handler(req) {
-  const { searchParams } = new URL(req.url);
-  let src = searchParams.get("src") || "";
-  if (!src) {
-    return new Response("Missing src", {
-      status: 400,
-      headers: { "access-control-allow-origin": "*" },
-    });
-  }
-
-  // Decode once, then decode again if we still see %25xx (double-encoded)
-  src = tryDecode(src);
-  if (/%25[0-9A-Fa-f]{2}/.test(src)) src = tryDecode(src);
-
-  let upstreamUrl;
+async function handler(req, res) {
   try {
-    const u = new URL(src);
+    const src = req.query.src;
+    if (!src) return res.status(400).send('Missing src');
 
-    // Microlink: be sure we really get an image
-    if (u.hostname.endsWith("microlink.io") && !u.searchParams.get("as")) {
-      u.searchParams.set("as", "image");
-    }
-    upstreamUrl = u.toString();
-  } catch {
-    return new Response("Bad src URL", {
-      status: 400,
-      headers: { "access-control-allow-origin": "*" },
-    });
-  }
-
-  try {
-    const resp = await fetch(upstreamUrl, {
-      redirect: "follow",
+    // Important: ne pas re-encoder src ici (il est déjà complet).
+    const upstream = await fetch(src, {
+      redirect: 'follow',
       headers: {
-        // some CDNs want a UA
-        "user-agent": "Mozilla/5.0 (compatible; Wordscape/1.0)",
+        // user-agent « normal » pour limiter les 403 anti-bot
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       },
     });
 
-    if (!resp.ok) {
-      const msg = await resp.text().catch(() => "");
-      return new Response(`Upstream ${resp.status}\n${msg}`, {
-        status: 502,
-        headers: { "access-control-allow-origin": "*" },
-      });
+    if (!upstream.ok) {
+      return res
+        .status(upstream.status)
+        .send(`Upstream error: ${upstream.statusText}`);
     }
 
-    const headers = new Headers({
-      "access-control-allow-origin": "*",
-      "cache-control": "public, s-maxage=86400, stale-while-revalidate=604800",
-      "content-type": resp.headers.get("content-type") || "image/png",
-    });
+    const contentType =
+      upstream.headers.get('content-type') || 'image/png';
 
-    return new Response(resp.body, { status: 200, headers });
-  } catch (err) {
-    return new Response("Fetch error", {
-      status: 502,
-      headers: { "access-control-allow-origin": "*" },
-    });
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    res.status(200).send(buf);
+  } catch (e) {
+    res.status(500).send('Proxy failed');
   }
 }
+
+export default withCORS(handler);
