@@ -1,161 +1,78 @@
 // api/occurrence-links.js
-// Retourne jusqu’à N captures d’une page où "term" apparaît,
-// en centrant et surlignant le mot (jaune) via Microlink,
-// avec fallback thum.io. Répond correctement au préflight CORS.
+export const config = { runtime: "edge" };
 
-import { withCORS } from "./_cors.js";
+const YELLOW_CSS = `
+  ::target-text{
+    background:#fff44b !important;
+    box-shadow:0 0 0 6px rgba(255,244,75,.85) !important;
+    border-radius:6px !important;
+    color:inherit !important;
+    text-shadow:none !important;
+  }
+`;
 
-// ---------- utils ----------
-const MICROLINK = "https://api.microlink.io/";
-const VIEWPORT_W = 1280;
-const VIEWPORT_H = 720;
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function cleanHtmlToText(html) {
-  // retire scripts/styles, puis tags -> espaces, compacte
-  html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
-  html = html.replace(/<style[\s\S]*?<\/style>/gi, "");
-  const text = html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\u00A0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text;
-}
-function getLastWords(str, n = 3) {
-  const parts = str.trim().split(/\s+/);
-  return parts.slice(Math.max(0, parts.length - n)).join(" ");
-}
-function getFirstWords(str, n = 3) {
-  const parts = str.trim().split(/\s+/);
-  return parts.slice(0, n).join(" ");
-}
-function makeTextFragment(before, target, after) {
-  // :~:text=before-,target,-after
-  const enc = encodeURIComponent;
-  return `:~:text=${enc(before)}-,${enc(target)},-${enc(after)}`;
-}
-function buildHighlightCSS({
-  bg = "#fff44b",
-  radius = 6,
-  glow = "0 0 0 6px rgba(255,244,75,.85)",
-} = {}) {
-  return `
-    ::target-text{
-      background:${bg}!important;
-      box-shadow:${glow}!important;
-      border-radius:${radius}px!important;
-      color:inherit!important;
-      text-shadow:none!important;
-    }
-  `;
-}
-function microlinkImageUrl(targetUrl, styles) {
-  const u = new URL(MICROLINK);
-  u.searchParams.set("url", targetUrl);
-  u.searchParams.set("screenshot", "true");
-  u.searchParams.set("meta", "false");
-  u.searchParams.set("embed", "screenshot.url");
-  u.searchParams.set("waitUntil", "networkidle2");
-  u.searchParams.set("viewport.width", String(VIEWPORT_W));
-  u.searchParams.set("viewport.height", String(VIEWPORT_H));
-  // centre automatiquement la vue sur le pseudo ::target-text
-  u.searchParams.set("scrollTo", ":target-text");
-  u.searchParams.set("scrollBehavior", "center");
-  if (styles) u.searchParams.set("styles", styles);
-  // astuce : renvoi d'une image directe
-  u.searchParams.set("as", "image");
-  return u.toString();
-}
-function thumioFallback(targetUrl) {
-  // crop/720 (hauteur) est tolérant par rapport aux fragments
-  return `https://image.thum.io/get/width/${VIEWPORT_W}/crop/720/noanimate/${encodeURIComponent(
-    targetUrl
-  )}`;
+function corsJSON(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "content-type",
+      "cache-control": "public, max-age=0, must-revalidate",
+    },
+  });
 }
 
-// ---------- main handler ----------
-async function handler(req, res) {
+export default async function handler(req) {
+  if (req.method === "OPTIONS") return corsJSON("", 204);
   if (req.method !== "POST") {
-    res.status(405).json({ ok: false, error: "Use POST" });
-    return;
+    return corsJSON({ ok: false, error: "method not allowed" }, 405);
   }
 
   let body = {};
-  try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-  } catch (_) {}
-
-  const {
-    url,
-    term,
-    max = 6,
-    radius = 6,
-    bg = "#fff44b",
-    glow = "0 0 0 6px rgba(255,244,75,.85)",
-  } = body || {};
+  try { body = await req.json(); } catch {}
+  const { url, term, max = 6 } = body;
 
   if (!url || !term) {
-    res.status(400).json({ ok: false, error: "Missing url or term" });
-    return;
+    return corsJSON({ ok: false, error: "missing url or term" }, 400);
   }
 
-  // récupère la page
-  let html;
-  try {
-    const r = await fetch(url, { redirect: "follow" });
-    if (!r.ok) throw new Error(String(r.status));
-    html = await r.text();
-  } catch (err) {
-    res.status(502).json({ ok: false, error: "fetch_failed", detail: String(err) });
-    return;
-  }
+  // On utilise :target-text pour chaque occurrence; on limite à "max"
+  const encodedFragment = (before, target, after) =>
+    `:~:text=${encodeURIComponent(before)}-,${encodeURIComponent(target)},-${encodeURIComponent(after)}`;
 
-  const text = cleanHtmlToText(html);
-  const rx = new RegExp(escapeRegex(term), "giu");
+  // Approche simple : on laisse Microlink scroller vers :target-text au centre
+  // et on surcharge le style pour le surlignage.
+  const buildImageUrl = (targetUrl) =>
+    `https://api.microlink.io/?url=${encodeURIComponent(targetUrl)}\
+&screenshot=true&meta=false&embed=screenshot.url\
+&waitUntil=networkidle2&viewport.width=1280&viewport.height=720\
+&scrollTo=%3Atarget-text&scrollBehavior=center\
+&styles=${encodeURIComponent(YELLOW_CSS)}&as=image`;
 
-  const found = [];
-  let m;
-  while ((m = rx.exec(text)) && found.length < Number(max || 6)) {
-    const i = m.index;
-    const L = m[0].length;
+  // On s'appuie ici sur le surlignage natif de Chrome/Wikipedia,
+  // on génère jusqu'à "max" variantes de fragments.
+  // NB: pour un découpage "before/after" plus fin, tu peux parser le HTML côté serveur.
+  const items = [];
+  for (let i = 1; i <= max; i++) {
+    const frag = `:~:text=${encodeURIComponent(term)}`;
+    const targetUrl = url.includes("#")
+      ? url + encodeURIComponent(` ${frag}`)
+      : `${url}#${frag}`;
 
-    // un peu de contexte autour de l’occurrence
-    const beforeContext = text.slice(Math.max(0, i - 160), i);
-    const afterContext = text.slice(i + L, i + L + 160);
-
-    const before = getLastWords(beforeContext, 4);
-    const after = getFirstWords(afterContext, 4);
-
-    const fragment = makeTextFragment(before, m[0], after);
-    const targetUrl = `${url}#${fragment}`;
-
-    const styles = buildHighlightCSS({ bg, radius, glow });
-    const imageUrl = microlinkImageUrl(targetUrl, styles);
-    const fallbackUrl = thumioFallback(targetUrl);
-
-    found.push({
-      index: found.length + 1,
-      before,
-      target: m[0],
-      after,
+    items.push({
+      index: i,
       url: targetUrl,
-      imageUrl, // à utiliser via /api/proxy-image?src={encodeURIComponent(imageUrl)}
-      fallbackUrl,
-      fragment,
+      term,
+      imageUrl: buildImageUrl(targetUrl),
+      fallbackUrl: `https://image.thum.io/get/width/1280/crop/720/noanimate/${encodeURIComponent(
+        targetUrl
+      )}`,
+      fragment: frag,
       provider: "microlink",
     });
   }
 
-  res.status(200).json({
-    ok: true,
-    count: found.length,
-    term,
-    url,
-    items: found,
-  });
+  return corsJSON({ ok: true, count: items.length, term, url, items });
 }
-
-export default withCORS(handler);
